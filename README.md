@@ -93,8 +93,8 @@ eventstorming_load_workshop({
 
 ### 주요 문서
 
-- **[사용 가이드](eventstorming_mcp_guide.md)** - 전체 기능 및 사용법
-- **[실전 튜토리얼](eventstorming_tutorial.md)** - 전자상거래 예제로 배우기
+- **[사용 가이드](docs/eventstorming_mcp_guide.md)** - 전체 기능 및 사용법
+- **[실전 튜토리얼](docs/eventstorming_tutorial.md)** - 전자상거래 예제로 배우기
 - **[API 레퍼런스](#api-레퍼런스)** - 모든 도구 상세 설명
 
 ### Event Storming이란?
