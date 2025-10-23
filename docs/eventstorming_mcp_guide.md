@@ -47,18 +47,13 @@ Event Storming MCP는 Domain-Driven Design(DDD)의 Event Storming 워크샵을 �
 
 ### 프로젝트 초기화
 ```bash
-uv init eventstorming_mcp
-cd eventstorming_mcp
+git clone https://github.com/narnia-ai-mason/eventstorming-mcp.git
+cd eventstorming-mcp
 ```
 
 ### 필수 요구사항
 ```bash
-uv add mcp pydantic
-```
-
-### 서버 실행
-```bash
-uv run eventstorming_mcp.py
+uv sync
 ```
 
 ### Claude Desktop 설정

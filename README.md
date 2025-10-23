@@ -38,12 +38,12 @@ Event Storming MCP는 Alberto Brandolini가 창안한 Event Storming 기법을 �
 ### 설치
 
 ```bash
-# 프로젝트 초기화
-uv init eventstorming_mcp
-cd eventstorming_mcp
+# 프로젝트 다운로드
+git clone https://github.com/narnia-ai-mason/eventstorming-mcp.git
+cd eventstorming-mcp
 
 # 필수 패키지 설치
-uv add mcp pydantic
+uv sync
 ```
 
 ### Claude Desktop 설정
