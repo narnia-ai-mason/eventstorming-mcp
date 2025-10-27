@@ -58,6 +58,13 @@ class ResponseFormat(str, Enum):
     JSON = "json"
 
 
+class DetailLevel(str, Enum):
+    """Detail level for element responses."""
+
+    SUMMARY = "summary"  # Essential fields only (id, type, name, position)
+    FULL = "full"  # All fields including notes, relationships, etc.
+
+
 # Traditional Event Storming color scheme
 ELEMENT_COLORS = {
     ElementType.EVENT: "orange",
@@ -89,6 +96,9 @@ class WorkshopMetadata(BaseModel):
     facilitators: List[str] = Field(
         default_factory=list, description="Workshop facilitators"
     )
+    schema_version: str = Field(
+        default="2.0", description="Data schema version for migration tracking"
+    )
 
 
 class BoundedContext(BaseModel):
@@ -113,9 +123,10 @@ class EventStormingElement(BaseModel):
     id: str = Field(..., description="Unique element identifier")
     type: ElementType = Field(..., description="Element type")
     name: str = Field(..., description="Element name", min_length=1, max_length=200)
-    description: Optional[str] = Field(default="", description="Detailed description")
     position: int = Field(default=0, description="Position in timeline (0-based)")
-    notes: Optional[str] = Field(default="", description="Additional notes")
+    notes: Optional[str] = Field(
+        default="", description="Notes and detailed description"
+    )
     created_at: str = Field(..., description="Creation timestamp")
     updated_at: str = Field(..., description="Last update timestamp")
     created_by: Optional[str] = Field(default="", description="Creator name")
@@ -142,6 +153,19 @@ class Workshop(BaseModel):
     metadata: WorkshopMetadata
     elements: List[EventStormingElement] = Field(default_factory=list)
     bounded_contexts: List[BoundedContext] = Field(default_factory=list)
+
+
+class PaginationInfo(BaseModel):
+    """Pagination metadata for paginated responses."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    page: int = Field(..., description="Current page number (1-indexed)", ge=1)
+    page_size: int = Field(..., description="Number of items per page", ge=1)
+    total_items: int = Field(..., description="Total number of items", ge=0)
+    total_pages: int = Field(..., description="Total number of pages", ge=0)
+    has_next: bool = Field(..., description="Whether there is a next page")
+    has_prev: bool = Field(..., description="Whether there is a previous page")
 
 
 # ============================================================================
@@ -185,6 +209,10 @@ class LoadWorkshopInput(BaseModel):
     workshop_id: str = Field(
         ..., description="Workshop ID to load (from list_workshops)", min_length=1
     )
+    detail_level: DetailLevel = Field(
+        default=DetailLevel.SUMMARY,
+        description="Detail level: summary (stats + essential fields) or full (all data)",
+    )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN, description="Output format"
     )
@@ -205,16 +233,15 @@ class AddElementInput(BaseModel):
         min_length=1,
         max_length=200,
     )
-    description: Optional[str] = Field(
-        default="", description="Detailed description", max_length=1000
-    )
     position: Optional[int] = Field(
         default=None,
         description="Position in timeline (auto-assigned if not provided)",
         ge=0,
     )
     notes: Optional[str] = Field(
-        default="", description="Additional notes or discussion points", max_length=500
+        default="",
+        description="Notes and detailed description",
+        max_length=2000,
     )
     created_by: Optional[str] = Field(
         default="", description="Creator name", max_length=100
@@ -242,11 +269,10 @@ class UpdateElementInput(BaseModel):
     name: Optional[str] = Field(
         default=None, description="New name", min_length=1, max_length=200
     )
-    description: Optional[str] = Field(
-        default=None, description="New description", max_length=1000
-    )
     position: Optional[int] = Field(default=None, description="New position", ge=0)
-    notes: Optional[str] = Field(default=None, description="New notes", max_length=500)
+    notes: Optional[str] = Field(
+        default=None, description="New notes and description", max_length=2000
+    )
     triggers: Optional[List[str]] = Field(
         default=None, description="New triggers list", max_items=20
     )
@@ -317,7 +343,7 @@ class SearchElementsInput(BaseModel):
     workshop_id: str = Field(..., description="Workshop ID", min_length=1)
     query: str = Field(
         ...,
-        description="Search query (searches in name, description, notes)",
+        description="Search query (searches in name and notes)",
         min_length=1,
         max_length=200,
     )
@@ -326,6 +352,14 @@ class SearchElementsInput(BaseModel):
     )
     bounded_context_id: Optional[str] = Field(
         default=None, description="Filter by bounded context"
+    )
+    page: int = Field(default=1, description="Page number (1-indexed)", ge=1)
+    page_size: int = Field(
+        default=50, description="Items per page", ge=1, le=200
+    )
+    detail_level: DetailLevel = Field(
+        default=DetailLevel.SUMMARY,
+        description="Detail level: summary (essential fields) or full (all fields)",
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN, description="Output format"
@@ -346,6 +380,14 @@ class GetTimelineInput(BaseModel):
     bounded_context_id: Optional[str] = Field(
         default=None, description="Filter by bounded context"
     )
+    page: int = Field(default=1, description="Page number (1-indexed)", ge=1)
+    page_size: int = Field(
+        default=50, description="Items per page", ge=1, le=200
+    )
+    detail_level: DetailLevel = Field(
+        default=DetailLevel.SUMMARY,
+        description="Detail level: summary (essential fields) or full (all fields)",
+    )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN, description="Output format"
     )
@@ -361,6 +403,14 @@ class GetContextOverviewInput(BaseModel):
     workshop_id: str = Field(..., description="Workshop ID", min_length=1)
     context_id: Optional[str] = Field(
         default=None, description="Specific context ID (shows all if not provided)"
+    )
+    page: int = Field(default=1, description="Page number for elements (1-indexed)", ge=1)
+    page_size: int = Field(
+        default=50, description="Items per page for elements", ge=1, le=200
+    )
+    detail_level: DetailLevel = Field(
+        default=DetailLevel.SUMMARY,
+        description="Detail level: summary (essential fields) or full (all fields)",
     )
     response_format: ResponseFormat = Field(
         default=ResponseFormat.MARKDOWN, description="Output format"
@@ -425,6 +475,12 @@ class VisualizeFlowInput(BaseModel):
     max_depth: int = Field(
         default=5, description="Maximum depth to traverse", ge=1, le=20
     )
+    max_elements: int = Field(
+        default=100,
+        description="Maximum number of elements to display in flow",
+        ge=1,
+        le=500,
+    )
 
 
 # ============================================================================
@@ -455,14 +511,66 @@ def save_workshop(workshop: Workshop) -> None:
         json.dump(workshop.model_dump(), f, indent=2, ensure_ascii=False)
 
 
+def migrate_workshop_data(data: dict) -> dict:
+    """Migrate old workshop data to current schema (v2.0).
+
+    Changes in v2.0:
+    - Removed EventStormingElement.description field
+    - Merged description content into notes field
+    - Added WorkshopMetadata.schema_version field
+
+    Args:
+        data: Raw workshop data dictionary
+
+    Returns:
+        Migrated data dictionary compatible with v2.0 schema
+    """
+    # Check schema version
+    schema_version = data.get("metadata", {}).get("schema_version", "1.0")
+
+    if schema_version == "2.0":
+        # Already migrated
+        return data
+
+    # Migrate elements: description → notes
+    for element in data.get("elements", []):
+        if "description" in element:
+            description = element.get("description", "").strip()
+            notes = element.get("notes", "").strip()
+
+            # Merge description into notes (description comes first)
+            if description and notes:
+                element["notes"] = f"{description}\n\n{notes}"
+            elif description:
+                element["notes"] = description
+            elif not notes:
+                element["notes"] = ""
+
+            # Remove description field
+            del element["description"]
+
+        # Ensure notes field exists
+        if "notes" not in element:
+            element["notes"] = ""
+
+    # Add schema_version to metadata
+    if "metadata" in data:
+        data["metadata"]["schema_version"] = "2.0"
+
+    return data
+
+
 def load_workshop(workshop_id: str) -> Workshop:
-    """Load workshop from disk."""
+    """Load workshop from disk with automatic schema migration."""
     path = get_workshop_path(workshop_id)
     if not path.exists():
         raise FileNotFoundError(f"Workshop not found: {workshop_id}")
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    # Automatic migration
+    data = migrate_workshop_data(data)
 
     return Workshop(**data)
 
@@ -475,8 +583,8 @@ def format_element_markdown(element: EventStormingElement) -> str:
         f"  Position: {element.position}",
     ]
 
-    if element.description:
-        lines.append(f"  Description: {element.description}")
+    if element.notes:
+        lines.append(f"  Notes: {element.notes}")
 
     if element.bounded_context_id:
         lines.append(f"  Context: {element.bounded_context_id}")
@@ -487,8 +595,85 @@ def format_element_markdown(element: EventStormingElement) -> str:
     if element.triggers:
         lines.append(f"  Triggers: {', '.join(element.triggers)}")
 
-    if element.notes:
-        lines.append(f"  Notes: {element.notes}")
+    return "\n".join(lines)
+
+
+def paginate_list(
+    items: List, page: int = 1, page_size: int = 50
+) -> tuple[List, PaginationInfo]:
+    """Paginate a list and return items with pagination metadata.
+
+    Args:
+        items: List of items to paginate
+        page: Page number (1-indexed)
+        page_size: Number of items per page
+
+    Returns:
+        Tuple of (paginated_items, pagination_info)
+    """
+    total_items = len(items)
+    total_pages = (total_items + page_size - 1) // page_size if total_items > 0 else 0
+
+    # Clamp page to valid range
+    page = max(1, min(page, total_pages if total_pages > 0 else 1))
+
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paginated_items = items[start_idx:end_idx]
+
+    pagination_info = PaginationInfo(
+        page=page,
+        page_size=page_size,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_prev=page > 1,
+    )
+
+    return paginated_items, pagination_info
+
+
+def format_element_summary(element: EventStormingElement) -> dict:
+    """Format element with summary-level detail (essential fields only).
+
+    Args:
+        element: Element to format
+
+    Returns:
+        Dictionary with essential fields only
+    """
+    return {
+        "id": element.id,
+        "type": element.type.value,
+        "name": element.name,
+        "position": element.position,
+        "bounded_context_id": element.bounded_context_id,
+    }
+
+
+def format_pagination_markdown(pagination: PaginationInfo) -> str:
+    """Format pagination info as markdown.
+
+    Args:
+        pagination: Pagination metadata
+
+    Returns:
+        Markdown string with pagination info
+    """
+    lines = [
+        f"**Page {pagination.page} of {pagination.total_pages}** "
+        f"(showing {len(range((pagination.page - 1) * pagination.page_size, min(pagination.page * pagination.page_size, pagination.total_items)))} "
+        f"of {pagination.total_items} items)"
+    ]
+
+    hints = []
+    if pagination.has_next:
+        hints.append(f"Use `page={pagination.page + 1}` for next page")
+    if pagination.has_prev:
+        hints.append(f"Use `page={pagination.page - 1}` for previous page")
+
+    if hints:
+        lines.append("💡 " + " | ".join(hints))
 
     return "\n".join(lines)
 
@@ -635,6 +820,7 @@ async def load_workshop_tool(params: LoadWorkshopInput) -> str:
     Args:
         params (LoadWorkshopInput): Parameters containing:
             - workshop_id (str): Workshop ID from list_workshops
+            - detail_level (DetailLevel): summary (stats only) or full (all data)
             - response_format (ResponseFormat): Output format (markdown or json)
 
     Returns:
@@ -652,7 +838,32 @@ async def load_workshop_tool(params: LoadWorkshopInput) -> str:
         )
 
     if params.response_format == ResponseFormat.JSON:
-        return json.dumps(workshop.model_dump(), indent=2)
+        if params.detail_level == DetailLevel.SUMMARY:
+            # Return summary with element list (essential fields only)
+            return json.dumps(
+                {
+                    "metadata": workshop.metadata.model_dump(),
+                    "elements": [
+                        format_element_summary(e) for e in workshop.elements
+                    ],
+                    "bounded_contexts": [
+                        {
+                            "id": ctx.id,
+                            "name": ctx.name,
+                            "element_count": len(ctx.element_ids),
+                        }
+                        for ctx in workshop.bounded_contexts
+                    ],
+                    "statistics": {
+                        "total_elements": len(workshop.elements),
+                        "total_contexts": len(workshop.bounded_contexts),
+                    },
+                },
+                indent=2,
+            )
+        else:
+            # FULL: Return all data
+            return json.dumps(workshop.model_dump(), indent=2)
 
     # Markdown format
     lines = [
@@ -700,6 +911,17 @@ async def load_workshop_tool(params: LoadWorkshopInput) -> str:
             )
         lines.append("")
 
+    # Add element list if SUMMARY level
+    if params.detail_level == DetailLevel.SUMMARY and workshop.elements:
+        lines.append("## Elements (Summary)")
+        for element in sorted(workshop.elements, key=lambda e: (e.type.value, e.position)):
+            lines.append(
+                f"- [{element.type.value}] **{element.name}** "
+                f"(pos: {element.position}, id: `{element.id}`)"
+            )
+        lines.append("")
+        lines.append("💡 Use `detail_level=full` to see all element details")
+
     content = "\n".join(lines)
     return truncate_response(
         content,
@@ -735,9 +957,8 @@ async def add_element(params: AddElementInput) -> str:
             - workshop_id (str): Workshop ID
             - type (ElementType): Element type
             - name (str): Element name
-            - description (Optional[str]): Detailed description
             - position (Optional[int]): Timeline position
-            - notes (Optional[str]): Additional notes
+            - notes (Optional[str]): Notes and detailed description
             - created_by (Optional[str]): Creator name
             - triggers (List[str]): Element IDs this triggers
             - triggered_by (List[str]): Element IDs that trigger this
@@ -763,7 +984,6 @@ async def add_element(params: AddElementInput) -> str:
         id=element_id,
         type=params.type,
         name=params.name,
-        description=params.description or "",
         position=position,
         notes=params.notes or "",
         created_at=timestamp,
@@ -820,9 +1040,8 @@ async def update_element(params: UpdateElementInput) -> str:
             - workshop_id (str): Workshop ID
             - element_id (str): Element ID to update
             - name (Optional[str]): New name
-            - description (Optional[str]): New description
             - position (Optional[int]): New position
-            - notes (Optional[str]): New notes
+            - notes (Optional[str]): New notes and description
             - triggers (Optional[List[str]]): New triggers
             - triggered_by (Optional[List[str]]): New triggered_by
             - bounded_context_id (Optional[str]): New context
@@ -846,9 +1065,6 @@ async def update_element(params: UpdateElementInput) -> str:
     if params.name is not None:
         element.name = params.name
         updated_fields.append("name")
-    if params.description is not None:
-        element.description = params.description
-        updated_fields.append("description")
     if params.position is not None:
         element.position = params.position
         updated_fields.append("position")
@@ -1102,8 +1318,8 @@ async def assign_to_context(params: AssignToContextInput) -> str:
 async def search_elements(params: SearchElementsInput) -> str:
     """Search for elements in the workshop by keyword.
 
-    Searches through element names, descriptions, and notes to find matching elements.
-    Results can be filtered by type and bounded context.
+    Searches through element names and notes to find matching elements.
+    Results can be filtered by type and bounded context. Supports pagination.
 
     Args:
         params (SearchElementsInput): Parameters containing:
@@ -1111,10 +1327,13 @@ async def search_elements(params: SearchElementsInput) -> str:
             - query (str): Search query
             - element_type (Optional[ElementType]): Filter by type
             - bounded_context_id (Optional[str]): Filter by context
+            - page (int): Page number (default: 1)
+            - page_size (int): Items per page (default: 50)
+            - detail_level (DetailLevel): summary or full (default: summary)
             - response_format (ResponseFormat): Output format
 
     Returns:
-        str: Matching elements in specified format
+        str: Matching elements in specified format with pagination
     """
     try:
         workshop = load_workshop(params.workshop_id)
@@ -1136,20 +1355,26 @@ async def search_elements(params: SearchElementsInput) -> str:
         ):
             continue
 
-        # Search in name, description, notes
-        if (
-            query_lower in element.name.lower()
-            or query_lower in element.description.lower()
-            or query_lower in element.notes.lower()
-        ):
+        # Search in name and notes
+        if query_lower in element.name.lower() or query_lower in element.notes.lower():
             matches.append(element)
 
+    # Apply pagination
+    paginated_matches, pagination = paginate_list(
+        matches, params.page, params.page_size
+    )
+
     if params.response_format == ResponseFormat.JSON:
+        if params.detail_level == DetailLevel.SUMMARY:
+            elements_data = [format_element_summary(e) for e in paginated_matches]
+        else:
+            elements_data = [e.model_dump() for e in paginated_matches]
+
         return json.dumps(
             {
                 "query": params.query,
-                "matches": [e.model_dump() for e in matches],
-                "count": len(matches),
+                "matches": elements_data,
+                "pagination": pagination.model_dump(),
             },
             indent=2,
         )
@@ -1157,21 +1382,27 @@ async def search_elements(params: SearchElementsInput) -> str:
     # Markdown format
     lines = [
         f"# Search Results: '{params.query}'",
-        f"Found {len(matches)} matching element(s)",
+        f"Found {pagination.total_items} matching element(s)",
+        "",
+        format_pagination_markdown(pagination),
         "",
     ]
 
-    if matches:
-        for element in matches:
-            lines.append(format_element_markdown(element))
-            lines.append("")
+    if paginated_matches:
+        for element in paginated_matches:
+            if params.detail_level == DetailLevel.SUMMARY:
+                lines.append(
+                    f"- [{element.type.value}] **{element.name}** "
+                    f"(pos: {element.position}, id: `{element.id}`)"
+                )
+            else:
+                lines.append(format_element_markdown(element))
+                lines.append("")
     else:
-        lines.append("No matching elements found.")
+        lines.append("No matching elements found on this page.")
 
     content = "\n".join(lines)
-    return truncate_response(
-        content, len(matches), "Refine your search query or add filters"
-    )
+    return content
 
 
 @mcp.tool(
@@ -1189,17 +1420,20 @@ async def get_timeline(params: GetTimelineInput) -> str:
 
     Shows elements arranged by their position in the timeline, which represents
     the chronological flow of events in the domain. Can be filtered by type
-    or bounded context.
+    or bounded context. Supports pagination.
 
     Args:
         params (GetTimelineInput): Parameters containing:
             - workshop_id (str): Workshop ID
             - element_type (Optional[ElementType]): Filter by type
             - bounded_context_id (Optional[str]): Filter by context
+            - page (int): Page number (default: 1)
+            - page_size (int): Items per page (default: 50)
+            - detail_level (DetailLevel): summary or full (default: summary)
             - response_format (ResponseFormat): Output format
 
     Returns:
-        str: Timeline view in specified format
+        str: Timeline view in specified format with pagination
     """
     try:
         workshop = load_workshop(params.workshop_id)
@@ -1218,9 +1452,19 @@ async def get_timeline(params: GetTimelineInput) -> str:
     # Sort by position
     elements = sorted(elements, key=lambda e: (e.position, e.created_at))
 
+    # Apply pagination
+    paginated_elements, pagination = paginate_list(
+        elements, params.page, params.page_size
+    )
+
     if params.response_format == ResponseFormat.JSON:
+        if params.detail_level == DetailLevel.SUMMARY:
+            elements_data = [format_element_summary(e) for e in paginated_elements]
+        else:
+            elements_data = [e.model_dump() for e in paginated_elements]
+
         return json.dumps(
-            {"timeline": [e.model_dump() for e in elements], "count": len(elements)},
+            {"timeline": elements_data, "pagination": pagination.model_dump()},
             indent=2,
         )
 
@@ -1237,24 +1481,27 @@ async def get_timeline(params: GetTimelineInput) -> str:
         if ctx:
             lines.append(f"Context: {ctx.name}")
 
-    if elements:
-        lines.append(f"\nShowing {len(elements)} element(s)\n")
+    lines.extend(["", format_pagination_markdown(pagination), ""])
 
+    if paginated_elements:
         current_position = None
-        for element in elements:
-            if element.position != current_position:
-                current_position = element.position
-                lines.append(f"\n## Position {current_position}")
-
-            lines.append(format_element_markdown(element))
-            lines.append("")
+        for element in paginated_elements:
+            if params.detail_level == DetailLevel.FULL:
+                if element.position != current_position:
+                    current_position = element.position
+                    lines.append(f"\n## Position {current_position}")
+                lines.append(format_element_markdown(element))
+                lines.append("")
+            else:
+                lines.append(
+                    f"- [{element.type.value}] **{element.name}** "
+                    f"(pos: {element.position}, id: `{element.id}`)"
+                )
     else:
-        lines.append("\nNo elements found.")
+        lines.append("No elements found on this page.")
 
     content = "\n".join(lines)
-    return truncate_response(
-        content, len(elements), "Use filters to narrow down results"
-    )
+    return content
 
 
 @mcp.tool(
@@ -1272,15 +1519,19 @@ async def get_context_overview(params: GetContextOverviewInput) -> str:
 
     Shows information about bounded contexts including their assigned elements,
     relationships, and statistics. Provides a high-level view of domain organization.
+    Supports pagination for elements within contexts.
 
     Args:
         params (GetContextOverviewInput): Parameters containing:
             - workshop_id (str): Workshop ID
             - context_id (Optional[str]): Specific context (all if not provided)
+            - page (int): Page number for elements (default: 1)
+            - page_size (int): Items per page for elements (default: 50)
+            - detail_level (DetailLevel): summary or full (default: summary)
             - response_format (ResponseFormat): Output format
 
     Returns:
-        str: Context overview in specified format
+        str: Context overview in specified format with pagination
     """
     try:
         workshop = load_workshop(params.workshop_id)
@@ -1295,11 +1546,20 @@ async def get_context_overview(params: GetContextOverviewInput) -> str:
         result = []
         for ctx in contexts:
             elements = [e for e in workshop.elements if e.id in ctx.element_ids]
+            paginated_elements, pagination = paginate_list(
+                elements, params.page, params.page_size
+            )
+
+            if params.detail_level == DetailLevel.SUMMARY:
+                elements_data = [format_element_summary(e) for e in paginated_elements]
+            else:
+                elements_data = [e.model_dump() for e in paginated_elements]
+
             result.append(
                 {
                     "context": ctx.model_dump(),
-                    "elements": [e.model_dump() for e in elements],
-                    "element_count": len(elements),
+                    "elements": elements_data,
+                    "pagination": pagination.model_dump(),
                     "type_breakdown": {
                         etype.value: len([e for e in elements if e.type == etype])
                         for etype in ElementType
@@ -1324,7 +1584,11 @@ async def get_context_overview(params: GetContextOverviewInput) -> str:
             lines.append(f"**Color**: {ctx.color}")
 
         elements = [e for e in workshop.elements if e.id in ctx.element_ids]
-        lines.append(f"**Elements**: {len(elements)}")
+        paginated_elements, pagination = paginate_list(
+            elements, params.page, params.page_size
+        )
+
+        lines.append(f"**Total Elements**: {len(elements)}")
 
         if elements:
             # Type breakdown
@@ -1334,20 +1598,27 @@ async def get_context_overview(params: GetContextOverviewInput) -> str:
 
             lines.append("\n### Element Breakdown")
             for etype, count in sorted(type_counts.items()):
-                lines.append(f"- {etype.value}: {count}")
+                if count > 0:
+                    lines.append(f"- {etype.value}: {count}")
 
-            lines.append("\n### Elements")
-            for element in sorted(elements, key=lambda e: (e.type.value, e.position)):
-                lines.append(
-                    f"- [{element.type.value}] {element.name} (pos: {element.position})"
-                )
+            lines.extend(["", "### Elements", format_pagination_markdown(pagination), ""])
+
+            for element in sorted(
+                paginated_elements, key=lambda e: (e.type.value, e.position)
+            ):
+                if params.detail_level == DetailLevel.SUMMARY:
+                    lines.append(
+                        f"- [{element.type.value}] **{element.name}** "
+                        f"(pos: {element.position}, id: `{element.id}`)"
+                    )
+                else:
+                    lines.append(format_element_markdown(element))
+                    lines.append("")
 
         lines.append("")
 
     content = "\n".join(lines)
-    return truncate_response(
-        content, len(contexts), "Use context_id parameter to view specific context"
-    )
+    return content
 
 
 @mcp.tool(
@@ -1496,7 +1767,8 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
         params (VisualizeFlowInput): Parameters containing:
             - workshop_id (str): Workshop ID
             - start_element_id (Optional[str]): Start element (shows all if not provided)
-            - max_depth (int): Maximum depth to traverse
+            - max_depth (int): Maximum depth to traverse (default: 5)
+            - max_elements (int): Maximum number of elements to display (default: 100)
 
     Returns:
         str: Markdown visualization of event flows
@@ -1506,6 +1778,8 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
     except FileNotFoundError as e:
         return json.dumps({"error": str(e)}, indent=2)
 
+    element_count = [0]  # Use list to make it mutable in nested function
+
     def trace_flow(
         element_id: str, depth: int, visited: set, indent: int = 0
     ) -> List[str]:
@@ -1513,7 +1787,13 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
         if depth >= params.max_depth or element_id in visited:
             return []
 
+        # Check max_elements limit
+        if element_count[0] >= params.max_elements:
+            return [f"{'  ' * indent}... (max elements limit reached)"]
+
         visited.add(element_id)
+        element_count[0] += 1
+
         element = next((e for e in workshop.elements if e.id == element_id), None)
         if not element:
             return []
@@ -1521,11 +1801,14 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
         prefix = "  " * indent
         lines = [f"{prefix}→ [{element.type.value}] **{element.name}** `{element.id}`"]
 
-        if element.description:
-            lines.append(f"{prefix}  _{element.description}_")
+        if element.notes and len(element.notes) < 100:  # Show short notes only
+            lines.append(f"{prefix}  _{element.notes}_")
 
         # Follow triggers
         for trigger_id in element.triggers:
+            if element_count[0] >= params.max_elements:
+                lines.append(f"{prefix}  ... (max elements limit reached)")
+                break
             lines.extend(trace_flow(trigger_id, depth + 1, visited, indent + 1))
 
         return lines
@@ -1562,16 +1845,22 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
             lines.append("")
 
             for root in roots:
+                if element_count[0] >= params.max_elements:
+                    lines.append("... (max elements limit reached)")
+                    break
                 lines.append(f"## Flow from: {root.name}")
                 lines.extend(trace_flow(root.id, 0, set()))
                 lines.append("")
 
+    if element_count[0] >= params.max_elements:
+        lines.append("")
+        lines.append(
+            f"⚠️ Display limit reached ({params.max_elements} elements). "
+            f"Use start_element_id to focus on specific flows."
+        )
+
     content = "\n".join(lines)
-    return truncate_response(
-        content,
-        len(workshop.elements),
-        "Use start_element_id to focus on specific flows",
-    )
+    return content
 
 
 # ============================================================================
