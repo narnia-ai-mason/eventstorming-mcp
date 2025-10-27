@@ -29,9 +29,11 @@ Event Storming MCP는 Alberto Brandolini가 창안한 Event Storming 기법을 �
 - 키워드 검색
 
 💾 **데이터 관리**
-- JSON 기반 영구 저장
+- JSON 기반 영구 저장 (UTF-8 한글 지원)
+- 마크다운/JSON 형식 Export (파일로 직접 저장)
 - 워크샵 내보내기/가져오기
-- 버전 관리 가능
+- 프로젝트별 워크스페이스 지원
+- 자동 마이그레이션
 
 ## 🚀 빠른 시작
 
@@ -50,15 +52,15 @@ uv sync
 
 `claude_desktop_config.json` 파일에 다음을 추가:
 
+**기본 설정 (홈 디렉토리에 저장)**
 ```json
 {
   "mcpServers": {
     "eventstorming": {
       "command": "uv",
       "args": [
-        "uv",
         "--directory",
-        "/path/to/eventstorming_mcp",
+        "/absolute/path/to/eventstorming-mcp",
         "run",
         "eventstorming_mcp.py"
       ]
@@ -66,6 +68,31 @@ uv sync
   }
 }
 ```
+
+**프로젝트별 워크스페이스 설정 (권장)**
+```json
+{
+  "mcpServers": {
+    "eventstorming": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/eventstorming-mcp",
+        "run",
+        "eventstorming_mcp.py"
+      ],
+      "env": {
+        "EVENTSTORMING_WORKSPACE": "/path/to/your/project/eventstorming"
+      }
+    }
+  }
+}
+```
+
+> 💡 **환경 변수 옵션**
+> - `EVENTSTORMING_WORKSPACE`를 설정하면 해당 프로젝트 디렉토리에 워크샵이 저장됩니다
+> - 미설정 시 기본 위치: `~/.eventstorming_workshops`
+> - 기존 워크샵이 있으면 자동으로 마이그레이션됩니다
 
 ### 첫 워크샵 시작
 

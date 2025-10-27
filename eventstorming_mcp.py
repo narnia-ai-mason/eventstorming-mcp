@@ -16,6 +16,9 @@ Features:
 """
 
 import json
+import os
+import shutil
+import sys
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -30,8 +33,70 @@ from pydantic import BaseModel, ConfigDict, Field
 # ============================================================================
 
 CHARACTER_LIMIT = 25000
-STORAGE_DIR = Path.home() / ".eventstorming_workshops"
-STORAGE_DIR.mkdir(exist_ok=True)
+
+# Environment variable support for workspace location
+DEFAULT_STORAGE_DIR = Path.home() / ".eventstorming_workshops"
+STORAGE_DIR = Path(os.getenv("EVENTSTORMING_WORKSPACE", str(DEFAULT_STORAGE_DIR)))
+EXPORT_DIR = STORAGE_DIR / "exports"
+
+
+# ============================================================================
+# AUTO-MIGRATION
+# ============================================================================
+
+
+def migrate_old_workshops():
+    """Migrate workshops from old default location to new location if needed.
+
+    This function is called on startup to automatically migrate existing workshops
+    when the user sets a custom EVENTSTORMING_WORKSPACE environment variable.
+
+    Migration happens only when:
+    1. EVENTSTORMING_WORKSPACE is set to a non-default location
+    2. The old default location has workshop files
+    3. The new location is empty or doesn't exist
+
+    Workshops are copied (not moved) to preserve the originals.
+    """
+    # If using default location, no migration needed
+    if STORAGE_DIR == DEFAULT_STORAGE_DIR:
+        STORAGE_DIR.mkdir(exist_ok=True)
+        EXPORT_DIR.mkdir(exist_ok=True)
+        return
+
+    # If old location doesn't exist, just create new directories
+    if not DEFAULT_STORAGE_DIR.exists():
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        return
+
+    # If new location already has workshops, don't migrate
+    if STORAGE_DIR.exists() and any(STORAGE_DIR.glob("*.json")):
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        return
+
+    # Perform migration: copy all JSON files from old to new location
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    migrated_count = 0
+    for old_file in DEFAULT_STORAGE_DIR.glob("*.json"):
+        new_file = STORAGE_DIR / old_file.name
+        if not new_file.exists():
+            shutil.copy2(old_file, new_file)
+            migrated_count += 1
+
+    if migrated_count > 0:
+        # Log migration to stderr (visible in MCP server logs)
+        print(
+            f"[Event Storming MCP] Migrated {migrated_count} workshop(s) "
+            f"from {DEFAULT_STORAGE_DIR} to {STORAGE_DIR}",
+            file=sys.stderr
+        )
+
+
+# Run migration on module load
+migrate_old_workshops()
 
 # ============================================================================
 # ENUMS
@@ -438,8 +503,26 @@ class ExportWorkshopInput(BaseModel):
     )
 
     workshop_id: str = Field(..., description="Workshop ID", min_length=1)
+    export_format: str = Field(
+        default="markdown",
+        description="Export format: 'markdown' (human-readable) or 'json' (re-importable)",
+        pattern="^(markdown|json)$",
+    )
+    export_path: Optional[str] = Field(
+        default=None,
+        description="Custom export path (default: {workspace}/exports/{name}_{timestamp}.{ext})",
+        max_length=500,
+    )
     include_metadata: bool = Field(
-        default=True, description="Include workshop metadata"
+        default=True, description="Include workshop metadata (JSON export only)"
+    )
+    include_statistics: bool = Field(
+        default=True,
+        description="Include statistics section (markdown export only)",
+    )
+    include_flow_diagram: bool = Field(
+        default=False,
+        description="Include Mermaid flow diagram (markdown export only)",
     )
 
 
@@ -691,6 +774,160 @@ def truncate_response(content: str, data_count: int, suggestion: str = "") -> st
     return truncated + message
 
 
+def generate_markdown_export(
+    workshop: Workshop,
+    include_statistics: bool = True,
+    include_flow_diagram: bool = False,
+) -> str:
+    """Generate markdown export of workshop.
+
+    Creates a human-readable markdown document with workshop metadata, statistics,
+    bounded contexts, timeline, and optionally a Mermaid flow diagram.
+
+    Args:
+        workshop: Workshop to export
+        include_statistics: Include statistics section
+        include_flow_diagram: Include Mermaid flow diagram
+
+    Returns:
+        Markdown formatted string
+    """
+    lines = [
+        f"# {workshop.metadata.name}",
+        "",
+        "## Metadata",
+        f"- **Domain**: {workshop.metadata.domain or 'Not specified'}",
+        f"- **Created**: {workshop.metadata.created_at}",
+        f"- **Updated**: {workshop.metadata.updated_at}",
+    ]
+
+    if workshop.metadata.description:
+        lines.extend(["", f"**Description**: {workshop.metadata.description}"])
+
+    if workshop.metadata.facilitators:
+        lines.extend(
+            ["", f"**Facilitators**: {', '.join(workshop.metadata.facilitators)}"]
+        )
+
+    # Statistics
+    if include_statistics:
+        lines.extend(["", "## Statistics", ""])
+
+        type_counts = {}
+        for element in workshop.elements:
+            type_counts[element.type] = type_counts.get(element.type, 0) + 1
+
+        lines.append("### Elements by Type")
+        for elem_type in ElementType:
+            count = type_counts.get(elem_type, 0)
+            if count > 0:
+                lines.append(f"- **{elem_type.value}**: {count}")
+
+        lines.append(f"\n**Total Elements**: {len(workshop.elements)}")
+        lines.append(f"**Bounded Contexts**: {len(workshop.bounded_contexts)}")
+
+        # Context coverage
+        contextualized = len([e for e in workshop.elements if e.bounded_context_id])
+        if len(workshop.elements) > 0:
+            coverage = (contextualized / len(workshop.elements)) * 100
+            lines.append(f"**Context Coverage**: {coverage:.1f}%")
+
+    # Bounded Contexts
+    if workshop.bounded_contexts:
+        lines.extend(["", "## Bounded Contexts", ""])
+
+        for ctx in workshop.bounded_contexts:
+            lines.append(f"### {ctx.name}")
+            if ctx.description:
+                lines.append(f"{ctx.description}")
+
+            elements = [e for e in workshop.elements if e.bounded_context_id == ctx.id]
+            lines.append(f"\n**Elements**: {len(elements)}")
+
+            if elements:
+                lines.append("")
+                for element in sorted(
+                    elements, key=lambda e: (e.type.value, e.position)
+                ):
+                    color = ELEMENT_COLORS.get(element.type, "gray")
+                    lines.append(
+                        f"- [{element.type.value}] **{element.name}** "
+                        f"(pos: {element.position}, {color})"
+                    )
+                    if element.notes:
+                        note_preview = (
+                            element.notes[:100] + "..."
+                            if len(element.notes) > 100
+                            else element.notes
+                        )
+                        lines.append(f"  > {note_preview}")
+            lines.append("")
+
+    # Timeline
+    lines.extend(["## Timeline", ""])
+
+    if workshop.elements:
+        sorted_elements = sorted(
+            workshop.elements, key=lambda e: (e.position, e.created_at)
+        )
+        current_position = None
+
+        for element in sorted_elements:
+            if element.position != current_position:
+                current_position = element.position
+                lines.append(f"\n### Position {current_position}")
+
+            color = ELEMENT_COLORS.get(element.type, "gray")
+            lines.append(f"\n**[{element.type.value.upper()}] {element.name}** ({color})")
+            lines.append(f"- **ID**: `{element.id}`")
+
+            if element.notes:
+                lines.append(f"- **Notes**: {element.notes}")
+
+            if element.bounded_context_id:
+                ctx = next(
+                    (c for c in workshop.bounded_contexts if c.id == element.bounded_context_id),
+                    None,
+                )
+                ctx_name = ctx.name if ctx else element.bounded_context_id
+                lines.append(f"- **Context**: {ctx_name}")
+
+            if element.triggered_by:
+                lines.append(f"- **Triggered by**: {len(element.triggered_by)} element(s)")
+
+            if element.triggers:
+                lines.append(f"- **Triggers**: {len(element.triggers)} element(s)")
+    else:
+        lines.append("*No elements in this workshop*")
+
+    # Mermaid flow diagram (optional)
+    if include_flow_diagram and workshop.elements:
+        lines.extend(["", "## Flow Diagram", "", "```mermaid", "graph TD"])
+
+        # Add nodes
+        for element in workshop.elements:
+            node_id = element.id[:8]  # Shortened ID
+            # Escape quotes and special characters for Mermaid
+            node_label = element.name.replace('"', "'")
+            lines.append(f'    {node_id}["{node_label}"]')
+
+        # Add edges
+        for element in workshop.elements:
+            node_id = element.id[:8]
+            for trigger_id in element.triggers:
+                trigger_node_id = trigger_id[:8]
+                lines.append(f"    {node_id} --> {trigger_node_id}")
+
+        lines.append("```")
+
+    # Footer
+    lines.extend(
+        ["", "---", f"*Exported from Event Storming MCP at {get_timestamp()}*"]
+    )
+
+    return "\n".join(lines)
+
+
 # ============================================================================
 # MCP SERVER INITIALIZATION
 # ============================================================================
@@ -753,7 +990,7 @@ async def create_workshop(params: CreateWorkshopInput) -> str:
         "storage_path": str(get_workshop_path(workshop_id)),
     }
 
-    return json.dumps(response, indent=2)
+    return json.dumps(response, indent=2, ensure_ascii=False)
 
 
 @mcp.tool(
@@ -798,7 +1035,7 @@ async def list_workshops() -> str:
 
     workshops.sort(key=lambda x: x["updated_at"], reverse=True)
 
-    return json.dumps({"workshops": workshops, "total": len(workshops)}, indent=2)
+    return json.dumps({"workshops": workshops, "total": len(workshops)}, indent=2, ensure_ascii=False)
 
 
 @mcp.tool(
@@ -835,6 +1072,7 @@ async def load_workshop_tool(params: LoadWorkshopInput) -> str:
                 "suggestion": "Use eventstorming_list_workshops to see available workshops",
             },
             indent=2,
+            ensure_ascii=False,
         )
 
     if params.response_format == ResponseFormat.JSON:
@@ -860,10 +1098,11 @@ async def load_workshop_tool(params: LoadWorkshopInput) -> str:
                     },
                 },
                 indent=2,
+                ensure_ascii=False,
             )
         else:
             # FULL: Return all data
-            return json.dumps(workshop.model_dump(), indent=2)
+            return json.dumps(workshop.model_dump(), indent=2, ensure_ascii=False)
 
     # Markdown format
     lines = [
@@ -970,7 +1209,7 @@ async def add_element(params: AddElementInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     element_id = generate_id()
     timestamp = get_timestamp()
@@ -1016,6 +1255,7 @@ async def add_element(params: AddElementInput) -> str:
             "message": f"{params.type.value.title()} '{params.name}' added successfully",
         },
         indent=2,
+        ensure_ascii=False,
     )
 
 
@@ -1052,12 +1292,12 @@ async def update_element(params: UpdateElementInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     element = next((e for e in workshop.elements if e.id == params.element_id), None)
     if not element:
         return json.dumps(
-            {"error": f"Element not found: {params.element_id}"}, indent=2
+            {"error": f"Element not found: {params.element_id}"}, indent=2, ensure_ascii=False
         )
 
     # Update fields
@@ -1105,6 +1345,7 @@ async def update_element(params: UpdateElementInput) -> str:
             "message": "Element updated successfully",
         },
         indent=2,
+        ensure_ascii=False,
     )
 
 
@@ -1135,12 +1376,12 @@ async def delete_element(params: DeleteElementInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     element = next((e for e in workshop.elements if e.id == params.element_id), None)
     if not element:
         return json.dumps(
-            {"error": f"Element not found: {params.element_id}"}, indent=2
+            {"error": f"Element not found: {params.element_id}"}, indent=2, ensure_ascii=False
         )
 
     element_name = element.name
@@ -1171,6 +1412,7 @@ async def delete_element(params: DeleteElementInput) -> str:
             "message": f"{element_type.title()} '{element_name}' deleted successfully",
         },
         indent=2,
+        ensure_ascii=False,
     )
 
 
@@ -1209,7 +1451,7 @@ async def create_bounded_context(params: CreateBoundedContextInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     context_id = generate_id()
 
@@ -1231,6 +1473,7 @@ async def create_bounded_context(params: CreateBoundedContextInput) -> str:
             "message": f"Bounded context '{params.name}' created successfully",
         },
         indent=2,
+        ensure_ascii=False,
     )
 
 
@@ -1262,14 +1505,14 @@ async def assign_to_context(params: AssignToContextInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     context = next(
         (c for c in workshop.bounded_contexts if c.id == params.context_id), None
     )
     if not context:
         return json.dumps(
-            {"error": f"Bounded context not found: {params.context_id}"}, indent=2
+            {"error": f"Bounded context not found: {params.context_id}"}, indent=2, ensure_ascii=False
         )
 
     assigned = []
@@ -1297,7 +1540,7 @@ async def assign_to_context(params: AssignToContextInput) -> str:
     if not_found:
         response["warnings"] = f"Elements not found: {', '.join(not_found)}"
 
-    return json.dumps(response, indent=2)
+    return json.dumps(response, indent=2, ensure_ascii=False)
 
 
 # ============================================================================
@@ -1338,7 +1581,7 @@ async def search_elements(params: SearchElementsInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     query_lower = params.query.lower()
     matches = []
@@ -1377,6 +1620,7 @@ async def search_elements(params: SearchElementsInput) -> str:
                 "pagination": pagination.model_dump(),
             },
             indent=2,
+            ensure_ascii=False,
         )
 
     # Markdown format
@@ -1438,7 +1682,7 @@ async def get_timeline(params: GetTimelineInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     # Filter elements
     elements = workshop.elements
@@ -1466,6 +1710,7 @@ async def get_timeline(params: GetTimelineInput) -> str:
         return json.dumps(
             {"timeline": elements_data, "pagination": pagination.model_dump()},
             indent=2,
+            ensure_ascii=False,
         )
 
     # Markdown format
@@ -1536,7 +1781,7 @@ async def get_context_overview(params: GetContextOverviewInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     contexts = workshop.bounded_contexts
     if params.context_id:
@@ -1566,7 +1811,7 @@ async def get_context_overview(params: GetContextOverviewInput) -> str:
                     },
                 }
             )
-        return json.dumps(result, indent=2)
+        return json.dumps(result, indent=2, ensure_ascii=False)
 
     # Markdown format
     lines = [f"# Bounded Contexts: {workshop.metadata.name}", ""]
@@ -1648,7 +1893,7 @@ async def get_statistics(params: GetStatisticsInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     stats = {
         "workshop": {
@@ -1696,7 +1941,7 @@ async def get_statistics(params: GetStatisticsInput) -> str:
             stats["coverage"]["elements_without_context"] += 1
 
     if params.response_format == ResponseFormat.JSON:
-        return json.dumps(stats, indent=2)
+        return json.dumps(stats, indent=2, ensure_ascii=False)
 
     # Markdown format
     lines = [
@@ -1776,7 +2021,7 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
     element_count = [0]  # Use list to make it mutable in nested function
 
@@ -1824,6 +2069,7 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
             return json.dumps(
                 {"error": f"Start element not found: {params.start_element_id}"},
                 indent=2,
+                ensure_ascii=False,
             )
 
         lines.append(f"## Flow from: {start.name}")
@@ -1872,49 +2118,120 @@ async def visualize_flow(params: VisualizeFlowInput) -> str:
     name="eventstorming_export_workshop",
     annotations={
         "title": "Export Event Storming Workshop",
-        "readOnlyHint": True,
+        "readOnlyHint": False,  # Changed: now writes files
         "destructiveHint": False,
-        "idempotentHint": True,
+        "idempotentHint": False,  # Changed: creates timestamped files
         "openWorldHint": False,
     },
 )
 async def export_workshop(params: ExportWorkshopInput) -> str:
-    """Export workshop data as JSON for sharing or backup.
+    """Export workshop to a file (markdown or JSON).
 
-    Creates a complete JSON export of the workshop that can be shared with
-    others or imported into another system. The export includes all elements,
-    contexts, and metadata.
+    Saves the workshop to a file in the exports directory. The file format
+    can be markdown (human-readable documentation) or JSON (for re-import).
+    Files are timestamped to prevent overwriting previous exports.
+
+    Markdown exports include formatted sections with metadata, statistics,
+    bounded contexts, and timeline. JSON exports preserve all data for
+    re-importing into another system.
 
     Args:
         params (ExportWorkshopInput): Parameters containing:
             - workshop_id (str): Workshop ID
-            - include_metadata (bool): Include workshop metadata
+            - export_format (str): "markdown" or "json" (default: markdown)
+            - export_path (Optional[str]): Custom export path
+            - include_metadata (bool): Include metadata (JSON only, default: True)
+            - include_statistics (bool): Include statistics (markdown only, default: True)
+            - include_flow_diagram (bool): Include Mermaid diagram (markdown only, default: False)
 
     Returns:
-        str: JSON export of workshop data
+        str: JSON response with export file path and info
     """
     try:
         workshop = load_workshop(params.workshop_id)
     except FileNotFoundError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps({"error": str(e)}, indent=2, ensure_ascii=False)
 
-    export_data = workshop.model_dump()
+    # Determine export path
+    if params.export_path:
+        export_path = Path(params.export_path)
+    else:
+        # Generate timestamped filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Create safe filename from workshop name
+        safe_name = "".join(
+            c if c.isalnum() or c in (" ", "-", "_") else "_"
+            for c in workshop.metadata.name
+        )
+        safe_name = safe_name.strip().replace(" ", "_")
 
-    if not params.include_metadata:
-        # Remove metadata fields
-        export_data["metadata"] = {
-            "name": workshop.metadata.name,
-            "domain": workshop.metadata.domain,
-            "description": workshop.metadata.description,
+        ext = "md" if params.export_format == "markdown" else "json"
+        filename = f"{safe_name}_{timestamp}.{ext}"
+        export_path = EXPORT_DIR / filename
+
+    # Ensure parent directory exists
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Generate export content
+    if params.export_format == "markdown":
+        content = generate_markdown_export(
+            workshop,
+            include_statistics=params.include_statistics,
+            include_flow_diagram=params.include_flow_diagram,
+        )
+
+        with open(export_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        file_size = export_path.stat().st_size
+
+        return json.dumps(
+            {
+                "success": True,
+                "format": "markdown",
+                "exported_to": str(export_path),
+                "file_size": file_size,
+                "message": f"Workshop exported to {export_path.name}",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    else:  # JSON format
+        export_data = workshop.model_dump()
+
+        if not params.include_metadata:
+            # Remove metadata fields
+            export_data["metadata"] = {
+                "name": workshop.metadata.name,
+                "domain": workshop.metadata.domain,
+                "description": workshop.metadata.description,
+            }
+
+        export_data["export_info"] = {
+            "exported_at": get_timestamp(),
+            "version": "2.0",
+            "tool": "eventstorming_mcp",
         }
 
-    export_data["export_info"] = {
-        "exported_at": get_timestamp(),
-        "version": "1.0",
-        "tool": "eventstorming_mcp",
-    }
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
 
-    return json.dumps(export_data, indent=2)
+        file_size = export_path.stat().st_size
+
+        return json.dumps(
+            {
+                "success": True,
+                "format": "json",
+                "exported_to": str(export_path),
+                "file_size": file_size,
+                "elements": len(workshop.elements),
+                "bounded_contexts": len(workshop.bounded_contexts),
+                "message": f"Workshop exported to {export_path.name}",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
 
 @mcp.tool(
@@ -1944,7 +2261,7 @@ async def import_workshop(params: ImportWorkshopInput) -> str:
     try:
         data = json.loads(params.workshop_data)
     except json.JSONDecodeError as e:
-        return json.dumps({"error": f"Invalid JSON data: {str(e)}"}, indent=2)
+        return json.dumps({"error": f"Invalid JSON data: {str(e)}"}, indent=2, ensure_ascii=False)
 
     # Create new workshop with new ID
     new_id = generate_id()
@@ -1962,7 +2279,7 @@ async def import_workshop(params: ImportWorkshopInput) -> str:
         workshop = Workshop(**data)
         save_workshop(workshop)
     except Exception as e:
-        return json.dumps({"error": f"Failed to import workshop: {str(e)}"}, indent=2)
+        return json.dumps({"error": f"Failed to import workshop: {str(e)}"}, indent=2, ensure_ascii=False)
 
     return json.dumps(
         {
@@ -1976,6 +2293,7 @@ async def import_workshop(params: ImportWorkshopInput) -> str:
             },
         },
         indent=2,
+        ensure_ascii=False,
     )
 
 
